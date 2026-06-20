@@ -1,1 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>操作ログ（管理者専用）</title>
+<style>
+  :root {
+    --green-600: #5C8A2E; --green-50: #F3F8EC; --gray-800: #1F2A1B;
+    --gray-400: #8A9A7E; --gray-50: #F7F9F5; --border-md: #E2E8DC;
+    --r-md: 10px; --r-sm: 6px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans JP', 'Hiragino Sans', sans-serif;
+    background: var(--gray-50); color: var(--gray-800);
+    margin: 0; padding: 24px 16px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .sub { font-size: 13px; color: var(--gray-400); margin-bottom: 20px; }
+  .status {
+    padding: 14px; border-radius: var(--r-md);
+    background: #fff; border: 1px solid var(--border-md);
+    font-size: 14px; margin-bottom: 16px;
+  }
+  table {
+    width: 100%; border-collapse: collapse; background: #fff;
+    border-radius: var(--r-md); overflow: hidden;
+    border: 1px solid var(--border-md); font-size: 12px;
+  }
+  th, td {
+    padding: 8px 10px; text-align: left;
+    border-bottom: 1px solid var(--border-md);
+    white-space: nowrap;
+  }
+  th {
+    background: var(--green-50); color: var(--green-600);
+    font-weight: 700; font-size: 11px;
+  }
+  tr:last-child td { border-bottom: none; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: var(--r-sm);
+    font-size: 11px; font-weight: 700;
+  }
+  .tag-create { background: #E6F4EA; color: #1E7B34; }
+  .tag-delete { background: #FBE6E6; color: #C0392B; }
+  .scroll-x { overflow-x: auto; }
+  .empty { text-align: center; color: var(--gray-400); padding: 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>操作ログ（管理者専用）</h1>
+  <p class="sub">予約の作成・削除履歴と、操作したLINEユーザーを表示します</p>
+  <div id="status" class="status">読み込み中...</div>
+  <button id="btnRefresh" style="display:none; margin-bottom:14px; padding:8px 16px; font-size:13px; font-weight:700; color:#5C8A2E; background:#F3F8EC; border:1px solid #E2E8DC; border-radius:8px; cursor:pointer; font-family:inherit;">
+    ↻ 再読み込み
+  </button>
+  <div class="scroll-x">
+    <table id="logTable" style="display:none">
+      <thead>
+        <tr>
+          <th>操作</th>
+          <th>日時</th>
+          <th>対象日</th>
+          <th>時間</th>
+          <th>時限</th>
+          <th>バンド名/個人名</th>
+          <th>鍵の返却者</th>
+          <th>操作者（LINE）</th>
+        </tr>
+      </thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+</div>
 
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+  const firebaseConfig = {
+    apiKey:            "AIzaSyAeJ3BidjE4fHzuve12gE_mEd5WXZmFezM",
+    authDomain:        "test-lightmusic.firebaseapp.com",
+    databaseURL:       "https://test-lightmusic-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId:         "test-lightmusic",
+  };
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const CF   = 'https://asia-southeast1-test-lightmusic.cloudfunctions.net';
+
+  const statusEl  = document.getElementById('status');
+  const tableEl   = document.getElementById('logTable');
+  const bodyEl    = document.getElementById('logBody');
+  const refreshEl = document.getElementById('btnRefresh');
+
+  const DAY_LABELS = {mon:'月',tue:'火',wed:'水',thu:'木',fri:'金',sat:'土'};
+
+  function fmtDate(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+    }[c]));
+  }
+
+  async function loadLogs(user) {
+    statusEl.style.display = '';
+    statusEl.textContent   = '読み込み中...';
+    tableEl.style.display  = 'none';
+    refreshEl.disabled     = true;
+
+    try {
+      const token = await user.getIdToken(/* forceRefresh= */ true);
+      const r = await fetch(`${CF}/getAuditLog`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: '{}'
+      });
+      const d = await r.json();
+
+      if (!r.ok) {
+        statusEl.textContent = d.error || 'ログの取得に失敗しました';
+        return;
+      }
+
+      bodyEl.innerHTML = ''; // 重複表示を防ぐため毎回クリア
+
+      if (!d.logs || d.logs.length === 0) {
+        statusEl.textContent = 'まだ操作ログがありません。';
+        return;
+      }
+
+      statusEl.style.display = 'none';
+      tableEl.style.display  = '';
+
+      d.logs.forEach(log => {
+        const tr = document.createElement('tr');
+        const tagClass = log.action === 'create' ? 'tag-create' : 'tag-delete';
+        const tagText  = log.action === 'create' ? '作成' : '削除';
+        const dayLabel = DAY_LABELS[log.day] || log.day || '';
+        tr.innerHTML = `
+          <td><span class="tag ${tagClass}">${tagText}</span></td>
+          <td>${fmtDate(log.timestamp)}</td>
+          <td>${log.dateKey || ''}（${dayLabel}）</td>
+          <td>${log.startTime || ''}〜${log.endTime || ''}</td>
+          <td>${log.period || '-'}</td>
+          <td>${escHtml(log.band || '')}</td>
+          <td>${escHtml(log.member || '')}</td>
+          <td>${escHtml(log.lineName || '(不明)')}</td>
+        `;
+        bodyEl.appendChild(tr);
+      });
+
+    } catch (e) {
+      console.error(e);
+      statusEl.style.display = '';
+      statusEl.textContent   = 'エラーが発生しました: ' + e.message;
+    } finally {
+      refreshEl.disabled = false;
+    }
+  }
+
+  onAuthStateChanged(auth, async user => {
+    if (!user) {
+      statusEl.textContent    = 'まず index.html でLINEログインしてから、このページを開いてください。';
+      refreshEl.style.display = 'none';
+      return;
+    }
+    refreshEl.style.display = '';
+    refreshEl.onclick = () => loadLogs(user);
+    loadLogs(user);
+  });
+</script>
+</body>
+</html>
