@@ -531,6 +531,15 @@
       background: var(--surface); padding: 2px 8px; border-radius: var(--r-sm);
       white-space: nowrap;
     }
+    @media (max-width: 640px) {
+      .closed-label {
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        white-space: normal;
+        padding: 6px 2px;
+        font-size: 9px;
+      }
+    }
 
     /* ── モバイル対応 ── */
     @media (max-width: 640px) {
