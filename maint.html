@@ -1189,20 +1189,18 @@ function applySaturdayLimit() {
 
   document.getElementById('endInput').max = isSat ? '15:30' : '19:00';
 
-  // 時限セレクタ：15:30を超える時限は土曜日のみ選択不可にする
+  // 時限セレクタ：15:30を超える時限は土曜日のみ選択不可にする（テキストは変更しない）
   const periodSel = document.getElementById('periodSel');
   Array.from(periodSel.options).forEach(opt => {
-    if (!opt.value) return; // プレースホルダーは対象外
+    if (!opt.value) return;
     const p = PERIODS[parseInt(opt.value)];
-    const exceeds = p && timeToMin(p.endTime) > SAT_END;
-    opt.disabled = isSat && exceeds;
-    if (opt.disabled) opt.textContent = opt.textContent.replace(/（土曜は予約不可）$/, '') + '（土曜は予約不可）';
-    else opt.textContent = opt.textContent.replace(/（土曜は予約不可）$/, '');
+    opt.disabled = isSat && p && timeToMin(p.endTime) > SAT_END;
   });
   // 選択中の時限が無効化された場合はリセット
   if (periodSel.selectedOptions[0]?.disabled) periodSel.value = '';
 }
 document.getElementById('daySel').addEventListener('change', applySaturdayLimit);
+document.getElementById('tabPeriod').addEventListener('click', ()=> switchTab('period'));
 document.getElementById('tabTime').addEventListener('click',   ()=> switchTab('time'));
 document.getElementById('periodSel').addEventListener('change', ()=>{
   const idx = parseInt(document.getElementById('periodSel').value);
