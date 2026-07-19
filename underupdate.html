@@ -166,8 +166,16 @@
     document.getElementById('btnLogout')?.addEventListener('click', () => signOut(auth));
 
     // ── グローバル関数 ──
-    // 読み取り：セキュリティルールで public read を許可済みのため認証不要
-    window._fbListen = (cb) => onValue(bookingsRef, snap => cb(snap.val() || {}));
+    // 読み取り：ログイン必須（セキュリティルールで auth != null に変更済み）
+    window._fbListen = (cb) => onValue(
+      bookingsRef,
+      snap => cb(snap.val() || {}),
+      err  => {
+        // 未ログイン時などのpermission deniedはエラーを無視して空データを渡す
+        console.warn('bookings read error:', err.code);
+        cb({});
+      }
+    );
 
     // 書き込み：Cloud Function経由（Firebaseトークンを添付）
     window._fbSave = async (id, data) => {
@@ -482,6 +490,23 @@
     }
     .delete-hint strong { color: var(--red-600); }
 
+    /* 最後の利用者向け警告 */
+    .last-user-warning {
+      background: #FFFBEB; border: 1px solid #FCD34D;
+      border-left: 4px solid #F59E0B;
+      border-radius: var(--r-sm); padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .last-user-msg {
+      font-size: 12px; color: #78350F; line-height: 1.6; margin-bottom: 8px;
+    }
+    .last-user-msg strong { font-weight: 700; }
+    .last-user-check {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 12px; color: #78350F; cursor: pointer; line-height: 1.5;
+    }
+    .last-user-check input[type=checkbox] { margin-top: 2px; flex-shrink: 0; }
+
     /* ⑤ 週更新サイクル注記 */
     .week-cycle-note {
       font-size: 10px; color: var(--gray-300);
@@ -773,6 +798,14 @@
       <h3>削除の確認</h3>
       <p class="sub">この操作は取り消せません</p>
       <p class="delete-hint" id="deleteHint"></p>
+      <!-- 最後の利用者向け警告（該当する場合のみ表示） -->
+      <div id="lastUserWarning" style="display:none" class="last-user-warning">
+        <p class="last-user-msg">⚠️ あなたはこの日の<strong>最後の利用者</strong>です。<br>鍵の返却について、前の利用者や関係者に連絡・確認してください。</p>
+        <label class="last-user-check">
+          <input type="checkbox" id="lastUserCheck" />
+          <span>連絡・確認することを了解しました</span>
+        </label>
+      </div>
       <div class="form-field" style="margin-bottom:8px;">
         <label>バンド名または個人名を入力して確定</label>
         <input type="text" id="deleteBandInput" placeholder="バンド名または個人名を入力..." autocomplete="off" />
@@ -1054,6 +1087,8 @@ function closeOverlay() {
   if (btnConf) { btnConf.disabled = false; btnConf.textContent = '削除する'; }
   const btnBook = document.getElementById('btnBook');
   if (btnBook) { btnBook.disabled = false; btnBook.textContent = '予約する'; }
+  const chk = document.getElementById('lastUserCheck');
+  if (chk) chk.checked = false;
   activeViewId   = null;
   activeViewBand = null;
 }
@@ -1134,16 +1169,34 @@ document.getElementById('btnBook').addEventListener('click', async ()=>{
 });
 
 // ② 削除ボタン → 確認エリアへ切り替え
+// ── 最後の利用者判定 ────────────────────────────
+function isLastBookingOfDay(booking) {
+  // 同じ日の他の予約の中で、この予約より終了時間が遅いものがあればfalse
+  return !Object.values(bookings).some(b =>
+    b.dateKey === booking.dateKey &&
+    b.id !== booking.id &&
+    timeToMin(b.endTime) > timeToMin(booking.endTime)
+  );
+}
+
 document.getElementById('btnDelete').addEventListener('click', ()=>{
   document.getElementById('deleteHint').innerHTML =
     `「<strong>${escHtml(activeViewBand)}</strong>」の予約を削除します。<br>バンド名または個人名をそのまま入力して確定してください。`;
   document.getElementById('deleteBandInput').value = '';
   document.getElementById('deleteErr').style.display = 'none';
+  document.getElementById('lastUserCheck').checked = false;
+
   // 前回の削除処理でボタンが「削除中...」のまま残っている可能性があるため、
   // 確認画面を開くたびに必ずリセットする
   const btnConf = document.getElementById('btnDeleteConfirm');
   btnConf.disabled = false;
   btnConf.textContent = '削除する';
+
+  // 最後の利用者かどうかを判定して警告を表示
+  const currentBooking = Object.values(bookings).find(b => b.id === activeViewId);
+  const isLast = currentBooking && isLastBookingOfDay(currentBooking);
+  document.getElementById('lastUserWarning').style.display = isLast ? '' : 'none';
+
   document.getElementById('viewArea').style.display          = 'none';
   document.getElementById('deleteConfirmArea').style.display = '';
   setTimeout(()=>document.getElementById('deleteBandInput').focus(), 60);
@@ -1160,6 +1213,14 @@ document.getElementById('btnDeleteConfirm').addEventListener('click', async ()=>
   const input   = document.getElementById('deleteBandInput').value.trim();
   const errEl   = document.getElementById('deleteErr');
   const btnConf = document.getElementById('btnDeleteConfirm');
+
+  // 最後の利用者警告が表示中の場合、チェックボックスを必須にする
+  const warningVisible = document.getElementById('lastUserWarning').style.display !== 'none';
+  if(warningVisible && !document.getElementById('lastUserCheck').checked) {
+    errEl.textContent = '連絡・確認の了解にチェックを入れてください';
+    errEl.style.display = 'block'; return;
+  }
+
   if(!input) {
     errEl.textContent = 'バンド名または個人名を入力してください';
     errEl.style.display = 'block'; return;
@@ -1175,7 +1236,8 @@ document.getElementById('btnDeleteConfirm').addEventListener('click', async ()=>
     await window._fbDelete(activeViewId);
     closeOverlay();
   } catch(e) {
-    errEl.textContent = '削除に失敗しました。接続を確認してください。';
+    const msg = e.message || '';
+    errEl.textContent = msg.includes('自分が作成した') ? msg : '削除に失敗しました。接続を確認してください。';
     errEl.style.display = 'block';
     btnConf.disabled = false;
     btnConf.textContent = '削除する';
