@@ -167,11 +167,11 @@
 
     // ── グローバル関数 ──
     // 読み取り：ログイン必須（セキュリティルールで auth != null に変更済み）
+    // unsubscribe関数を返す（ログイン状態が変わったときにリスナーを再起動するため）
     window._fbListen = (cb) => onValue(
       bookingsRef,
       snap => cb(snap.val() || {}),
       err  => {
-        // 未ログイン時などのpermission deniedはエラーを無視して空データを渡す
         console.warn('bookings read error:', err.code);
         cb({});
       }
@@ -399,7 +399,15 @@
     .bb-band   { font-size: 11px; font-weight: 700; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .bb-member { font-size: 10px; color: #6B7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-    /* 今週以外の閲覧モード通知 */
+    /* 未ログイン案内バナー */
+    .login-required-banner {
+      display: flex; align-items: center; gap: 8px;
+      background: #EFF6FF; border: 1px solid #BFDBFE;
+      border-radius: var(--r-md); padding: 10px 16px;
+      font-size: 13px; color: #1E40AF; margin-bottom: 0.75rem;
+    }
+    .lrb-icon { font-size: 15px; flex-shrink: 0; }
+    .login-required-banner strong { font-weight: 700; }
     .week-notice {
       display: flex; align-items: center; gap: 8px;
       background: var(--gray-50); border: 1px solid var(--border-md);
@@ -696,6 +704,12 @@
     <span>この週は閲覧のみです — 新規予約・削除は<strong>今週のみ</strong>行えます</span>
   </div>
   <p class="week-cycle-note">※ 週は日曜 0:00 に更新されます</p>
+
+  <!-- 未ログイン時の案内バナー -->
+  <div id="loginRequiredBanner" class="login-required-banner" style="display:none">
+    <span class="lrb-icon">🔒</span>
+    <span>予約状況を確認・予約するには <strong>LINEでログイン</strong> してください</span>
+  </div>
 
   <div class="tl-outer">
     <div class="tl-inner">
@@ -1306,30 +1320,66 @@ initTimeline();
 updateHeader();
 
 // Firebase 準備完了を待つ
+let _unsubscribeBookings = null; // リスナーのunsubscribe関数
+
+function startBookingListener() {
+  // 既存のリスナーを停止してから再起動（二重登録防止）
+  if (_unsubscribeBookings) { _unsubscribeBookings(); _unsubscribeBookings = null; }
+  _unsubscribeBookings = window._fbListen(data => {
+    bookings = data;
+    renderBookings();
+  });
+}
+
+function stopBookingListener() {
+  if (_unsubscribeBookings) { _unsubscribeBookings(); _unsubscribeBookings = null; }
+  bookings = {};
+  renderBookings();
+}
+
+// 未ログイン案内の表示切り替え
+function updateLoginBanner(isLoggedIn) {
+  const banner = document.getElementById('loginRequiredBanner');
+  if (banner) banner.style.display = isLoggedIn ? 'none' : '';
+}
+
 function onFirebaseReady() {
   fbReady = true;
   setStatus('connected', 'リアルタイム同期中');
   document.getElementById('loadingOverlay').classList.add('hidden');
-
-  // リアルタイムリスナー（読み取りは認証不要）
-  window._fbListen(data => {
-    bookings = data;
-    renderBookings();
-  });
-  updateHeader(); // btnNew は currentUser=null なので disabled のまま
+  updateHeader();
+  // ログイン状態は auth-changed で確認してからリスナーを開始する
+  // （currentUser がすでにセットされている場合はここで開始）
+  if (currentUser) {
+    startBookingListener();
+    updateLoginBanner(true);
+  } else {
+    updateLoginBanner(false);
+  }
 }
 
-// 認証状態変化を受け取り、予約ボタンの有効/無効を切り替える
+// 認証状態変化を受け取り、リスナーの再起動・停止・案内表示を制御
 document.addEventListener('auth-changed', e => {
+  const prev = currentUser;
   currentUser = e.detail.user;
-  if (fbReady) updateHeader();
+  if (fbReady) {
+    updateHeader();
+    if (currentUser && !prev) {
+      // ログインした → リスナーを（再）起動
+      startBookingListener();
+      updateLoginBanner(true);
+    } else if (!currentUser && prev) {
+      // ログアウトした → リスナーを停止してカレンダーをクリア
+      stopBookingListener();
+      updateLoginBanner(false);
+    }
+  }
 });
 
 if(window._fbReady) {
   onFirebaseReady();
 } else {
   document.addEventListener('firebase-ready', onFirebaseReady);
-  // タイムアウト（設定ミスの場合）
   setTimeout(()=>{
     if(!fbReady){
       setStatus('error', '接続失敗 — 設定を確認してください');
