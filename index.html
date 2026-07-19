@@ -988,11 +988,23 @@ function initTimeline() {
         periodSel.value = String(periodIdx);
         periodSel.dispatchEvent(new Event('change'));
       } else {
-        // 時限と時限の間・時限外 → 時刻タブで開く
-        const snapped  = Math.round(clickedMin / 15) * 15;
-        const startMin = Math.max(DAY_START, Math.min(dayEnd - 30, snapped));
-        const endMin   = Math.min(dayEnd, startMin + 60);
-        openForm(d, minToTime(startMin), minToTime(endMin));
+        // 時限と時限のギャップをクリック → 直後の時限にスナップ
+        const nextIdx = PERIODS.findIndex(p =>
+          timeToMin(p.startTime) > clickedMin &&
+          timeToMin(p.endTime) <= dayEnd
+        );
+        if (nextIdx >= 0) {
+          openForm(d);
+          const periodSel = document.getElementById('periodSel');
+          periodSel.value = String(nextIdx);
+          periodSel.dispatchEvent(new Event('change'));
+        } else {
+          // 授業外より後（18:30〜19:00）→ 時刻タブで開く
+          const snapped  = Math.round(clickedMin / 15) * 15;
+          const startMin = Math.max(DAY_START, Math.min(dayEnd - 30, snapped));
+          const endMin   = Math.min(dayEnd, startMin + 60);
+          openForm(d, minToTime(startMin), minToTime(endMin));
+        }
       }
     });
   });
