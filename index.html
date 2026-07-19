@@ -968,15 +968,32 @@ function initTimeline() {
     }
     col.addEventListener('click', e=>{
       if(!fbReady || weekOffset !== 0 || !currentUser || e.target.closest('.booking-block')) return;
-      const scrollEl = col.closest('.tl-scroll');
-      const rect     = col.getBoundingClientRect();
-      const scrollTop= scrollEl ? scrollEl.scrollTop : 0;
-      const y        = e.clientY - rect.top + scrollTop - TOP_OFFSET;
-      const snapped  = Math.round((DAY_START + y/PX_PER_MIN)/15)*15;
-      const dayEnd   = (d === 'sat') ? SAT_END : DAY_END;
-      const startMin = Math.max(DAY_START, Math.min(dayEnd-30, snapped));
-      const endMin   = Math.min(dayEnd, startMin+60);
-      openForm(d, minToTime(startMin), minToTime(endMin));
+      const rect       = col.getBoundingClientRect();
+      // getBoundingClientRect() はビューポート基準のため、スクロール量は自動考慮済み
+      // スクロールオフセットを加算すると二重カウントになるため不要
+      const y          = e.clientY - rect.top - TOP_OFFSET;
+      const clickedMin = DAY_START + y / PX_PER_MIN;
+      const dayEnd     = (d === 'sat') ? SAT_END : DAY_END;
+
+      // クリックした位置が時限内かどうか判定
+      const periodIdx = PERIODS.findIndex(p => {
+        const ps = timeToMin(p.startTime), pe = timeToMin(p.endTime);
+        return clickedMin >= ps && clickedMin < pe && pe <= dayEnd;
+      });
+
+      if (periodIdx >= 0) {
+        // 時限内をクリック → 時限タブで開き、その時限を自動選択
+        openForm(d);
+        const periodSel = document.getElementById('periodSel');
+        periodSel.value = String(periodIdx);
+        periodSel.dispatchEvent(new Event('change'));
+      } else {
+        // 時限と時限の間・時限外 → 時刻タブで開く
+        const snapped  = Math.round(clickedMin / 15) * 15;
+        const startMin = Math.max(DAY_START, Math.min(dayEnd - 30, snapped));
+        const endMin   = Math.min(dayEnd, startMin + 60);
+        openForm(d, minToTime(startMin), minToTime(endMin));
+      }
     });
   });
 
