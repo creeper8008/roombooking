@@ -51,9 +51,12 @@
 
     let _pendingDisplayName = null;
     let _liffInitialized    = false;
+    let _isAuthenticating   = false; // 同時ログイン試行を防ぐフラグ
 
     // ── LINEアクセストークンでFirebase認証（LIFF・OAuth共通）──
     async function authenticateWithLineToken(accessToken) {
+      if (_isAuthenticating) return; // 既に認証中なら無視
+      _isAuthenticating = true;
       const btn = document.getElementById('btnLineLogin');
       if (btn) { btn.textContent = '認証中...'; btn.disabled = true; }
       try {
@@ -66,13 +69,17 @@
         if (!r.ok) {
           console.error('Auth failed:', d.error);
           if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+          _isAuthenticating = false;
           return;
         }
         _pendingDisplayName = d.displayName;
         await signInWithCustomToken(auth, d.customToken);
+        // サインイン成功後にフラグを戻す（onAuthStateChangedが先に呼ばれる場合もあるため）
+        _isAuthenticating = false;
       } catch (e) {
         console.error('Authentication error:', e);
         if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+        _isAuthenticating = false;
       }
     }
 
@@ -83,13 +90,10 @@
       try {
         await liff.init({ liffId: LIFF_ID });
         if (liff.isLoggedIn()) {
-          // LINEアプリ内：トークン取得してそのまま認証
           await authenticateWithLineToken(liff.getAccessToken());
         } else if (liff.isInClient()) {
-          // LINE内だがLIFF未ログイン（稀）→ 自動リダイレクト
           liff.login({ redirectUri: location.href });
         }
-        // 通常ブラウザ：何もしない（ボタンを表示したまま）
       } catch (e) {
         console.error('LIFF init error:', e);
       }
@@ -103,32 +107,36 @@
     if (_code) {
       const savedState = localStorage.getItem('lineState');
       if (savedState !== _state) {
-        // localStorageが共有されない特殊なブラウザ環境向けの保険
         console.warn('state mismatch (storage isolated?). Proceeding with code anyway.');
       }
       localStorage.removeItem('lineState');
       history.replaceState({}, '', location.pathname);
       (async () => {
+        if (_isAuthenticating) return; // 既に認証中なら無視
+        _isAuthenticating = true;
         const btn = document.getElementById('btnLineLogin');
         if (btn) { btn.textContent = '認証中...'; btn.disabled = true; }
         try {
           const r = await fetch(`${CF}/lineAuth`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: _code })  // codeで送る（OAuth用）
+            body: JSON.stringify({ code: _code })
           });
           const d = await r.json();
           if (!r.ok) {
             alert(d.error || 'ログインに失敗しました');
             if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+            _isAuthenticating = false;
             return;
           }
           _pendingDisplayName = d.displayName;
           await signInWithCustomToken(auth, d.customToken);
+          _isAuthenticating = false;
         } catch (e) {
           console.error('OAuth error:', e);
-          alert('ログイン中にエラーが発生しました');
+          // エラーでも既にログインできている場合があるため、alertではなくコンソールのみ
           if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+          _isAuthenticating = false;
         }
       })();
     }
@@ -149,7 +157,6 @@
         const area = document.getElementById('userArea');
         if (btn)  { btn.style.display = ''; btn.textContent = 'LINEでログイン'; btn.disabled = false; }
         if (area)   area.style.display = 'none';
-        // 未ログイン かつ OAuthコールバック中でなければ LIFF自動ログインを試みる
         if (!_code) tryLiffAutoLogin();
       }
       document.dispatchEvent(new CustomEvent('auth-changed', { detail: { user } }));
@@ -157,6 +164,12 @@
 
     // ── LINEログインボタン ──
     document.getElementById('btnLineLogin')?.addEventListener('click', () => {
+      // LINEブラウザ（LIFF文脈）ではliff.login()を使う（OAuthとの混在を防ぐ）
+      if (_liffInitialized && typeof liff !== 'undefined' && liff.isInClient()) {
+        liff.login({ redirectUri: location.href });
+        return;
+      }
+      // 通常ブラウザ：OAuth フロー
       const state = crypto.randomUUID
         ? crypto.randomUUID()
         : Math.random().toString(36).slice(2);
@@ -170,7 +183,15 @@
     });
 
     // ── ログアウト ──
-    document.getElementById('btnLogout')?.addEventListener('click', () => signOut(auth));
+    document.getElementById('btnLogout')?.addEventListener('click', async () => {
+      await signOut(auth);
+      // LINEブラウザ（LIFF文脈）ではLIFFセッションもリセットして再ログインへ
+      if (_liffInitialized && typeof liff !== 'undefined' && liff.isInClient()) {
+        _liffInitialized = false; // 次回tryLiffAutoLoginが動くようにリセット
+        liff.logout();
+        liff.login({ redirectUri: location.href });
+      }
+    });
 
     // ── グローバル関数 ──
     // 読み取り：ログイン必須（セキュリティルールで auth != null に変更済み）
