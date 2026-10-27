@@ -1,265 +1,1452 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>メンテナンス中</title>
-<!-- Google Fonts: Noto Sans JP -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-<!-- Font Awesome (フッターとスケジュールアイコン用) -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- PWA：ホーム画面アイコン・アプリ名設定 -->
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="部室予約" />
+  <meta name="theme-color" content="#3B6D11" />
+  <title>軽音楽部 — 部室予約</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- ========================================================
+    ?? STEP 1: Firebase の設定をここに貼り付けてください
+       Firebase Console → プロジェクトの設定 → マイアプリ → CDN
+       下の YOUR_*** の部分をすべて自分の値に書き換えてください
+  ======================================================== -->
+  <!-- LIFF SDK（LINEアプリ内で自動ログインするために必要） -->
+  <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+
+  <script type="module">
+    import { initializeApp }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getDatabase, ref, onValue }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+    import { getAuth, signInWithCustomToken, onAuthStateChanged, signOut, updateProfile }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+    const firebaseConfig = {
+      apiKey:            "AIzaSyAeJ3BidjE4fHzuve12gE_mEd5WXZmFezM",
+      authDomain:        "test-lightmusic.firebaseapp.com",
+      databaseURL:       "https://test-lightmusic-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId:         "test-lightmusic",
+      storageBucket:     "test-lightmusic.firebasestorage.app",
+      messagingSenderId: "55108410187",
+      appId:             "1:55108410187:web:f46d2610abebd5afc2a6ce",
+      measurementId:     "G-KDMV9MDHR6"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const db   = getDatabase(app);
+    const auth = getAuth(app);
+    const bookingsRef = ref(db, 'bookings');
+
+    const CF      = 'https://asia-southeast1-test-lightmusic.cloudfunctions.net';
+    const LIFF_ID = '2010370089-Dt4j5zab';
+
+    let _pendingDisplayName = null;
+    let _liffInitialized    = false;
+    let _isAuthenticating   = false; // 同時ログイン試行を防ぐフラグ
+
+    // ── LINEアクセストークンでFirebase認証（LIFF・OAuth共通）──
+    async function authenticateWithLineToken(accessToken) {
+      if (_isAuthenticating) return; // 既に認証中なら無視
+      _isAuthenticating = true;
+      const btn = document.getElementById('btnLineLogin');
+      if (btn) { btn.textContent = '認証中...'; btn.disabled = true; }
+      try {
+        const r = await fetch(`${CF}/lineAuth`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accessToken })
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          console.error('Auth failed:', d.error);
+          if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+          _isAuthenticating = false;
+          return;
+        }
+        _pendingDisplayName = d.displayName;
+        await signInWithCustomToken(auth, d.customToken);
+        // サインイン成功後にフラグを戻す（onAuthStateChangedが先に呼ばれる場合もあるため）
+        _isAuthenticating = false;
+      } catch (e) {
+        console.error('Authentication error:', e);
+        if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+        _isAuthenticating = false;
+      }
+    }
+
+    // ── LIFF自動ログイン（LINEアプリ内で開いた場合に実行）──
+    async function tryLiffAutoLogin() {
+      if (_liffInitialized || typeof liff === 'undefined') return;
+      _liffInitialized = true;
+      try {
+        await liff.init({ liffId: LIFF_ID });
+        if (liff.isLoggedIn()) {
+          await authenticateWithLineToken(liff.getAccessToken());
+        } else if (liff.isInClient()) {
+          liff.login({ redirectUri: location.href });
+        }
+      } catch (e) {
+        console.error('LIFF init error:', e);
+      }
+    }
+
+    // ── OAuthコールバック処理（通常ブラウザでボタン押した場合）──
+    const _p     = new URLSearchParams(location.search);
+    const _code  = _p.get('code');
+    const _state = _p.get('state');
+
+    if (_code) {
+      const savedState = localStorage.getItem('lineState');
+      if (savedState !== _state) {
+        console.warn('state mismatch (storage isolated?). Proceeding with code anyway.');
+      }
+      localStorage.removeItem('lineState');
+      history.replaceState({}, '', location.pathname);
+      (async () => {
+        if (_isAuthenticating) return; // 既に認証中なら無視
+        _isAuthenticating = true;
+        const btn = document.getElementById('btnLineLogin');
+        if (btn) { btn.textContent = '認証中...'; btn.disabled = true; }
+        try {
+          const r = await fetch(`${CF}/lineAuth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: _code })
+          });
+          const d = await r.json();
+          if (!r.ok) {
+            alert(d.error || 'ログインに失敗しました');
+            if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+            _isAuthenticating = false;
+            return;
+          }
+          _pendingDisplayName = d.displayName;
+          await signInWithCustomToken(auth, d.customToken);
+          _isAuthenticating = false;
+        } catch (e) {
+          console.error('OAuth error:', e);
+          // エラーでも既にログインできている場合があるため、alertではなくコンソールのみ
+          if (btn) { btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+          _isAuthenticating = false;
+        }
+      })();
+    }
+
+    // ── 認証状態の変化を監視 ──
+    onAuthStateChanged(auth, async user => {
+      if (user) {
+        if (_pendingDisplayName && !user.displayName) {
+          await updateProfile(user, { displayName: _pendingDisplayName });
+          _pendingDisplayName = null;
+        }
+        const btn  = document.getElementById('btnLineLogin');
+        const area = document.getElementById('userArea');
+        if (btn)   btn.style.display   = 'none';
+        if (area)  area.style.display  = 'flex';
+      } else {
+        const btn  = document.getElementById('btnLineLogin');
+        const area = document.getElementById('userArea');
+        if (btn)  { btn.style.display = ''; btn.textContent = 'LINEでログイン'; btn.disabled = false; }
+        if (area)   area.style.display = 'none';
+        if (!_code) tryLiffAutoLogin();
+      }
+      document.dispatchEvent(new CustomEvent('auth-changed', { detail: { user } }));
+    });
+
+    // ── LINEログインボタン ──
+    document.getElementById('btnLineLogin')?.addEventListener('click', () => {
+      // LINEブラウザ（LIFF文脈）ではliff.login()を使う（OAuthとの混在を防ぐ）
+      if (_liffInitialized && typeof liff !== 'undefined' && liff.isInClient()) {
+        liff.login({ redirectUri: location.href });
+        return;
+      }
+      // 通常ブラウザ：OAuth フロー
+      const state = crypto.randomUUID
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
+      localStorage.setItem('lineState', state);
+      location.href = 'https://access.line.me/oauth2/v2.1/authorize'
+        + '?response_type=code'
+        + '&client_id=2010370089'
+        + `&redirect_uri=${encodeURIComponent('https://creeper8008.github.io/roombooking/')}`
+        + `&state=${state}`
+        + '&scope=profile%20openid';
+    });
+
+    // ── ログアウト ──
+    document.getElementById('btnLogout')?.addEventListener('click', async () => {
+      await signOut(auth);
+      // LINEブラウザ（LIFF文脈）ではLIFFセッションもリセットして再ログインへ
+      if (_liffInitialized && typeof liff !== 'undefined' && liff.isInClient()) {
+        _liffInitialized = false; // 次回tryLiffAutoLoginが動くようにリセット
+        liff.logout();
+        liff.login({ redirectUri: location.href });
+      }
+    });
+
+    // ── グローバル関数 ──
+    // 読み取り：ログイン必須（セキュリティルールで auth != null に変更済み）
+    // unsubscribe関数を返す（ログイン状態が変わったときにリスナーを再起動するため）
+    window._fbListen = (cb) => onValue(
+      bookingsRef,
+      snap => cb(snap.val() || {}),
+      err  => {
+        console.warn('bookings read error:', err.code);
+        cb({});
+      }
+    );
+
+    // 書き込み：Cloud Function経由（Firebaseトークンを添付）
+    window._fbSave = async (id, data) => {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログインが必要です');
+      const r = await fetch(`${CF}/saveBooking`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ id, data })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '保存に失敗しました');
+    };
+
+    // 削除：Cloud Function経由
+    window._fbDelete = async (id) => {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログインが必要です');
+      const r = await fetch(`${CF}/deleteBooking`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ id })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '削除に失敗しました');
+    };
+
+    window._fbReady = true;
+    document.dispatchEvent(new Event('firebase-ready'));
+  </script>
+
+  <style>
     :root {
-        --bg-color: #e4f0fc;
-        --card-bg: #ffffff;
-        --text-main: #2c3e50;
-        --text-sub: #475569;
-        --accent-blue: #1b5693;
-        --icon-bg-blue: #84bbf1; /* 画像の水色を再現 */
-        --border-color: #d1e2f3;
-        --divider-dotted: #a6cbf0;
+      --green-50:  #EAF3DE;
+      --green-200: #97C459;
+      --green-400: #639922;
+      --green-600: #3B6D11;
+      --green-800: #27500A;
+      --gray-50:   #F7F6F2;
+      --gray-100:  #EDECE7;
+      --gray-200:  #D8D7D0;
+      --gray-300:  #B8B7B0;
+      --gray-400:  #9A9990;
+      --gray-600:  #5F5E58;
+      --gray-800:  #2C2C28;
+      --red-100:   #F7C1C1;
+      --red-600:   #A32D2D;
+      --red-bg:    #FCEBEB;
+      --bg:        #F4F3EE;
+      --surface:   #FFFFFF;
+      --border:    rgba(0,0,0,0.08);
+      --border-md: rgba(0,0,0,0.15);
+      --r-sm: 6px; --r-md: 10px; --r-lg: 16px;
+      --shadow-sm: 0 1px 4px rgba(0,0,0,0.07);
+      --shadow-md: 0 4px 24px rgba(0,0,0,0.10);
     }
-
-    * {
-        box-sizing: border-box;
-        margin: 0;
-        padding: 0;
-    }
-
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-        background-color: var(--bg-color);
-        font-family: 'Noto Sans JP', sans-serif;
-        color: var(--text-main);
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        min-height: 100vh;
-        padding: 20px;
+      font-family: 'Noto Sans JP', sans-serif;
+      background: var(--bg); color: var(--gray-800);
+      min-height: 100vh; font-size: 14px;
+    }
+    @supports (min-height: 100dvh) {
+      body { min-height: 100dvh; }
     }
 
-    .maintenance-card {
-        background-color: var(--card-bg);
-        width: 100%;
-        max-width: 500px;
-        border-radius: 16px;
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
-        padding: 50px 40px;
-        text-align: center;
+    /* ── ページヘッダー ── */
+    .page-header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 1.5rem; display: flex; align-items: center; gap: 12px;
+      height: 56px; box-shadow: var(--shadow-sm);
+    }
+    .logo-mark {
+      width: 32px; height: 32px; background: var(--green-400);
+      border-radius: var(--r-sm); display: flex; align-items: center;
+      justify-content: center; font-size: 17px; color: #fff;
+    }
+    .page-header h1 { font-size: 15px; font-weight: 700; flex: 1; }
+
+    /* 操作ガイドアイコン（控えめ・困ったときに見る用） */
+    .guide-icon {
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 1px solid var(--border-md); background: none;
+      color: var(--gray-400); font-size: 12px; font-weight: 700;
+      font-family: inherit; cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .guide-icon:hover { color: var(--green-600); border-color: var(--green-300); }
+    .guide-modal { width: 420px; }
+    .guide-list { list-style: none; padding: 0; margin-bottom: 1.25rem; }
+    .guide-list li {
+      font-size: 13px; line-height: 1.7; color: var(--gray-600);
+      padding: 9px 0; border-bottom: 1px solid var(--border-md);
+    }
+    .guide-list li:last-child { border-bottom: none; }
+    .guide-list li strong { color: var(--gray-800); font-weight: 700; }
+
+    /* 接続ステータスバッジ */
+    .status-badge {
+      margin-left: auto; display: flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 10px;
+      border-radius: 99px; border: 1px solid var(--border-md);
+      background: var(--gray-50); color: var(--gray-400);
+      transition: all 0.3s;
+    }
+    .status-badge.connected { background: var(--green-50); border-color: var(--green-200); color: var(--green-600); }
+    .status-badge.error     { background: var(--red-bg);   border-color: var(--red-100);   color: var(--red-600); }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .status-badge.connected .status-dot { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
+
+    /* ── ツールバー ── */
+    .container { max-width: 1120px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 1rem; flex-wrap: wrap; }
+    .week-nav {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r-md); padding: 7px 12px; box-shadow: var(--shadow-sm);
+    }
+    .week-nav button {
+      background: none; border: 1px solid var(--border-md);
+      border-radius: var(--r-sm); padding: 4px 12px;
+      cursor: pointer; font-size: 13px; color: var(--gray-600);
+      font-family: inherit; transition: background 0.12s;
+    }
+    .week-nav button:hover { background: var(--gray-50); }
+    .week-label { font-size: 13px; font-weight: 500; padding: 0 6px; white-space: nowrap; }
+    .today-btn { background: var(--green-50) !important; border-color: var(--green-200) !important; color: var(--green-600) !important; font-weight: 500 !important; }
+    .btn-new {
+      display: flex; align-items: center; gap: 6px;
+      background: var(--green-400); color: #fff; border: none;
+      border-radius: var(--r-md); padding: 9px 20px;
+      font-size: 14px; font-weight: 700; font-family: inherit; cursor: pointer;
+      box-shadow: 0 2px 8px rgba(99,153,34,0.30);
+      transition: background 0.15s, transform 0.1s; white-space: nowrap;
+    }
+    .btn-new:hover { background: var(--green-600); transform: translateY(-1px); }
+    .btn-new:disabled { background: var(--gray-300); box-shadow: none; cursor: not-allowed; transform: none; }
+
+    /* ── タイムライン ── */
+    .tl-outer {
+      overflow-x: auto; border-radius: var(--r-lg);
+      box-shadow: var(--shadow-md); background: var(--surface);
+    }
+    .tl-inner { min-width: 620px; display: flex; flex-direction: column; }
+
+    .tl-header {
+      display: flex; border-bottom: 2px solid var(--border-md);
+      background: var(--surface); flex-shrink: 0;
+    }
+    .tl-ruler-head { display: none; }
+    .tl-day-head {
+      flex: 1; padding: 10px 4px; text-align: center;
+      font-size: 12px; font-weight: 500; color: var(--gray-400);
+      border-right: 1px solid var(--border);
+    }
+    .tl-day-head .date-num {
+      font-size: 11px; font-family: 'DM Mono', monospace;
+      opacity: 0.7; display: block; margin-top: 1px;
+    }
+    .tl-day-head.today { background: var(--green-50); color: var(--green-600); }
+
+    .tl-scroll { overflow-y: auto; max-height: min(736px, 78vh); }
+    .tl-body   { display: flex; position: relative; }
+
+    /* 時限列（ルーラーに代わるラベル列） */
+    .tl-period-head {
+      width: 56px; flex-shrink: 0;
+      border-right: 2px solid var(--border-md);
+      background: var(--gray-50);
+    }
+    .tl-period-col {
+      width: 56px; flex-shrink: 0; position: relative;
+      border-right: 2px solid var(--border-md); background: var(--gray-50);
+      overflow: hidden;
+    }
+    .period-section {
+      position: absolute; left: 0; right: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: var(--ps-bg, rgba(99,153,34,0.08));
+      border-top: 2px solid var(--ps-color, #97C459);
+      overflow: hidden; padding: 2px 2px; gap: 2px;
+    }
+    .ps-name {
+      font-size: 10px; font-weight: 700; line-height: 1;
+      color: var(--ps-text, #27500A); white-space: nowrap;
+    }
+    .ps-time {
+      font-size: 7.5px; font-family: 'DM Mono', monospace;
+      color: var(--ps-muted, #639922); text-align: center;
+      line-height: 1.25; white-space: nowrap;
     }
 
-    /* アイコンコンテナ（水色の円） */
-    .icon-container {
-        width: 120px;
-        height: 120px;
-        background-color: var(--icon-bg-blue);
-        border-radius: 50%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        margin: 0 auto 30px;
-        /* ペンギンが円からはみ出ないように */
-        overflow: hidden; 
+    .tl-day-col {
+      flex: 1; position: relative;
+      border-right: 1px solid var(--border); cursor: crosshair; overflow: hidden;
+    }
+    .tl-day-col:last-child { border-right: none; }
+    .tl-day-col.today-col  { background: #FBFFF6; }
+
+    .tl-gline { position: absolute; left: 0; right: 0; height: 0; pointer-events: none; }
+    .tl-gline.hour { border-top: 1px solid var(--border-md); }
+    .tl-gline.half { border-top: 1px dashed var(--border); }
+
+    /* 予約ブロック — インディゴ白カード（全時限背景と明確に区別） */
+    .booking-block {
+      position: absolute; left: 3px; right: 3px;
+      border-radius: var(--r-sm);
+      background: #FFFFFF;
+      border: 1.5px solid rgba(79,70,229,0.22);
+      border-left: 4px solid #4F46E5;
+      padding: 3px 5px; overflow: hidden; cursor: pointer; z-index: 10;
+      box-shadow: 0 1px 5px rgba(0,0,0,0.10);
+      transition: box-shadow 0.12s, transform 0.1s;
+    }
+    .booking-block:hover { box-shadow: 0 3px 10px rgba(79,70,229,0.20); transform: scaleX(0.97); }
+    .bb-time   { font-size: 9px; font-family: 'DM Mono', monospace; color: #6366F1; }
+    .bb-period { font-size: 9px; color: #3730A3; font-weight: 700; line-height: 1; }
+    .bb-band   { font-size: 11px; font-weight: 700; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bb-member { font-size: 10px; color: #6B7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* 未ログイン案内バナー */
+    .login-required-banner {
+      display: flex; align-items: center; gap: 8px;
+      background: #EFF6FF; border: 1px solid #BFDBFE;
+      border-radius: var(--r-md); padding: 10px 16px;
+      font-size: 13px; color: #1E40AF; margin-bottom: 0.75rem;
+    }
+    .lrb-icon { font-size: 15px; flex-shrink: 0; }
+    .login-required-banner strong { font-weight: 700; }
+    .week-notice {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--gray-50); border: 1px solid var(--border-md);
+      border-radius: var(--r-md); padding: 8px 14px;
+      font-size: 12px; color: var(--gray-600); margin-bottom: 1rem;
+    }
+    .week-notice-icon { font-size: 14px; }
+
+    /* 時限チップ（viewArea） */
+    .view-period-chip {
+      background: var(--green-50); color: var(--green-600);
+      font-family: 'Noto Sans JP', sans-serif; font-weight: 700;
+      font-size: 13px; padding: 5px 10px; border-radius: var(--r-sm);
+      display: inline-block; margin-bottom: 12px; margin-left: 6px;
     }
 
-    /* 再現したペンギンSVG */
-    .icon-container svg {
-        width: 60px; /* 画像のサイズ感を再現 */
-        height: auto;
-        fill: white; /* 白いペンギン */
-        display: block;
+    /* ローディング */
+    .loading-overlay {
+      position: fixed; inset: 0; background: rgba(255,255,255,0.8);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 300; gap: 12px;
+    }
+    .loading-overlay.hidden { display: none; }
+    .spinner {
+      width: 36px; height: 36px; border: 3px solid var(--green-100);
+      border-top-color: var(--green-400); border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text { font-size: 13px; color: var(--gray-400); }
+
+    /* モーダル */
+    .overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.40); z-index: 200;
+      align-items: center; justify-content: center; padding: 1rem;
+    }
+    .overlay.show { display: flex; }
+    .modal {
+      background: var(--surface); border-radius: var(--r-lg);
+      border: 1px solid var(--border); padding: 1.75rem;
+      width: 400px; max-width: 100%; box-shadow: var(--shadow-md);
+      animation: modalIn 0.17s ease;
+    }
+    @keyframes modalIn { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+    .modal h3   { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
+    .modal .sub { font-size: 13px; color: var(--gray-400); margin-bottom: 1.25rem; }
+    .form-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .form-field { display: flex; flex-direction: column; gap: 4px; }
+    .form-field.full { grid-column: 1 / -1; }
+    .form-field label { font-size: 12px; color: var(--gray-600); font-weight: 500; }
+    .form-field select,
+    .form-field input[type=time],
+    .form-field input[type=text] {
+      padding: 11px 12px; border: 1px solid var(--border-md);
+      border-radius: var(--r-sm); font-size: 16px;
+      font-family: 'DM Mono', monospace; background: var(--surface);
+      color: var(--gray-800); outline: none; transition: border-color 0.15s; width: 100%;
+    }
+    .form-field input[type=text] { font-family: 'Noto Sans JP', sans-serif; }
+    .form-field select:focus, .form-field input:focus { border-color: var(--green-400); }
+    .err {
+      font-size: 12px; color: var(--red-600); margin-bottom: 6px; display: none;
+      padding: 6px 10px; background: var(--red-bg); border-radius: var(--r-sm);
+    }
+    .modal-btns { display: flex; gap: 10px; margin-top: 12px; }
+    .modal-btns button {
+      flex: 1; padding: 10px; border-radius: var(--r-sm);
+      border: 1px solid var(--border-md); cursor: pointer;
+      font-size: 14px; font-family: inherit; font-weight: 500; transition: background 0.15s;
+    }
+    .btn-book { background: var(--green-400); color: #fff; border-color: var(--green-400) !important; }
+    .btn-book:hover { background: var(--green-600); }
+    .btn-sec  { background: none; color: var(--gray-600); }
+    .btn-sec:hover  { background: var(--gray-50); }
+    .btn-del  { background: none; color: var(--red-600); border-color: var(--red-100) !important; }
+    .btn-del:hover  { background: var(--red-bg); }
+    .view-chip   { display: inline-block; background: var(--green-50); color: var(--green-600); font-family: 'DM Mono', monospace; font-size: 13px; padding: 5px 10px; border-radius: var(--r-sm); margin-bottom: 12px; }
+    .view-band   { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .view-member { font-size: 13px; color: var(--gray-400); margin-bottom: 1.25rem; }
+
+    /* ② 削除確認エリア */
+    .delete-hint {
+      font-size: 12px; color: var(--gray-600); line-height: 1.6;
+      background: var(--red-bg); border-radius: var(--r-sm);
+      padding: 8px 12px; margin-bottom: 12px;
+      border-left: 3px solid var(--red-100);
+    }
+    .delete-hint strong { color: var(--red-600); }
+
+    /* 最後の利用者向け警告 */
+    .last-user-warning {
+      background: #FFFBEB; border: 1px solid #FCD34D;
+      border-left: 4px solid #F59E0B;
+      border-radius: var(--r-sm); padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .last-user-msg {
+      font-size: 12px; color: #78350F; line-height: 1.6; margin-bottom: 8px;
+    }
+    .last-user-msg strong { font-weight: 700; }
+    .last-user-check {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 12px; color: #78350F; cursor: pointer; line-height: 1.5;
+    }
+    .last-user-check input[type=checkbox] { margin-top: 2px; flex-shrink: 0; }
+
+    /* ⑤ 週更新サイクル注記 */
+    .week-cycle-note {
+      font-size: 10px; color: var(--gray-300);
+      text-align: right; margin-top: -0.6rem; margin-bottom: 0.8rem;
+      letter-spacing: 0.01em;
     }
 
-    /* ペンギンの写真アイコン */
-    .icon-container img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
+    /* タブ切り替え（時限／時刻） */
+    .booking-tabs {
+      display: flex;
+      border: 1px solid var(--border-md);
+      border-radius: var(--r-sm);
+      overflow: hidden;
+    }
+    .tab-btn {
+      flex: 1; padding: 9px 0;
+      font-size: 13px; font-family: inherit; font-weight: 600;
+      background: none; border: none; cursor: pointer;
+      color: var(--gray-400); transition: background 0.15s, color 0.15s;
+    }
+    .tab-btn.active  { background: var(--green-400); color: #fff; }
+    .tab-btn:not(.active):hover { background: var(--gray-50); color: var(--gray-800); }
+    #tabContentTime {
+      grid-column: 1 / -1;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .period-band {
+      position: absolute; left: 0; right: 0;
+      pointer-events: none; z-index: 0;
+      border-top: 2px solid var(--pb-border, #97C459);
+    }
+    /* 土曜15:30以降の閉室帯 */
+    .closed-band {
+      position: absolute; left: 0; right: 0;
+      background: repeating-linear-gradient(
+        135deg, rgba(120,120,120,0.07), rgba(120,120,120,0.07) 6px,
+        rgba(120,120,120,0.13) 6px, rgba(120,120,120,0.13) 12px
+      );
+      border-top: 2px solid var(--gray-300);
+      z-index: 5; pointer-events: none;
+      display: flex; align-items: flex-start; justify-content: center;
+      padding-top: 8px;
+    }
+    .closed-label {
+      font-size: 10px; font-weight: 700; color: var(--gray-400);
+      background: var(--surface); padding: 2px 8px; border-radius: var(--r-sm);
+      white-space: nowrap;
+    }
+    @media (max-width: 640px) {
+      .closed-label { display: none; }
     }
 
-    h1 {
-        font-size: 24px;
-        font-weight: 700;
-        margin-bottom: 25px;
-        letter-spacing: 1px;
+    /* ── モバイル対応 ── */
+    @media (max-width: 640px) {
+      .page-header { padding: 0 0.75rem; height: 50px; gap: 8px; }
+      .page-header h1 { font-size: 13px; }
+      .guide-icon { width: 20px; height: 20px; font-size: 11px; }
+      .page-header > p { display: none; }
+      .status-badge { font-size: 10px; padding: 3px 7px; }
+      .container {
+        padding: 0.75rem 0.5rem;
+        /* LINEブラウザ等の下部バーに被らないよう、余白を大きめに確保 */
+        padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 6rem);
+      }
+      .toolbar { gap: 6px; margin-bottom: 0.75rem; }
+      .week-nav { padding: 5px 8px; gap: 6px; }
+      .week-nav button {
+        padding: 8px 14px; font-size: 14px;
+        min-width: 44px; min-height: 40px;
+      }
+      .week-label { font-size: 12px; padding: 0 4px; }
+      .btn-new { padding: 10px 18px; font-size: 14px; min-height: 44px; }
+      .tab-btn { padding: 12px 0; font-size: 14px; min-height: 44px; }
+      .modal-btns button { padding: 13px; font-size: 15px; min-height: 48px; }
+      .booking-tabs { margin-bottom: 2px; }
+      .tl-inner { min-width: 480px; }
+      .tl-scroll { max-height: none; overflow-y: visible; -webkit-overflow-scrolling: auto; } /* ページ全体スクロールに任せる */
+      .tl-outer {
+        overflow-y: hidden;                /* 縦方向はタッチを奪わない */
+        -webkit-overflow-scrolling: auto;  /* 慣性スクロールによる引っかかりを完全排除 */
+      }
+      .tl-day-head { padding: 7px 2px; font-size: 11px; }
+      .tl-day-head .date-num { font-size: 10px; }
+      .bb-band   { font-size: 12px; }
+      .bb-member { font-size: 10px; }
+      .bb-time, .bb-period { font-size: 9px; }
+      .modal { padding: 1.25rem; }
+      .form-grid { grid-template-columns: 1fr; }
+      .form-field.full { grid-column: 1; }
+      #tabContentTime { grid-template-columns: 1fr; } /* 時刻入力を縦並びに（iOSの時刻UIがはみ出すため） */
     }
 
-    .divider-dotted {
-        border: none;
-        border-top: 3px dotted var(--divider-dotted);
-        margin: 0 auto 25px;
-        width: 100%;
+    /* LINEログイン・ユーザーエリア */
+    .toolbar-auth { display: flex; align-items: center; }
+    .user-area    { display: flex; align-items: center; gap: 10px; }
+    .btn-line {
+      background: #06C755; color: #fff;
+      border: none; border-radius: var(--r-md);
+      padding: 9px 16px; font-size: 13px; font-weight: 700;
+      font-family: inherit; cursor: pointer;
+      display: flex; align-items: center; gap: 7px;
+      transition: background 0.15s; white-space: nowrap;
     }
-
-    .message {
-        font-size: 15px;
-        line-height: 1.8;
-        color: var(--text-main);
-        margin-bottom: 30px;
+    .btn-line:hover    { background: #05B34B; }
+    .btn-line:disabled { opacity: 0.65; cursor: default; }
+    .user-name {
+      font-size: 13px; font-weight: 500; color: var(--gray-600);
+      max-width: 100px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
     }
-
-    .divider-solid {
-        border: none;
-        border-top: 1px solid var(--border-color);
-        margin: 30px 0;
+    .btn-logout {
+      font-size: 12px; color: var(--gray-400);
+      background: none; border: 1px solid var(--border-md);
+      border-radius: var(--r-sm); padding: 5px 10px;
+      cursor: pointer; font-family: inherit;
+      transition: color 0.12s, border-color 0.12s; white-space: nowrap;
     }
-
-    .schedule-container {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 0 10px;
-    }
-
-    .schedule-block {
-        flex: 1;
-        text-align: left;
-    }
-
-    .schedule-block.right {
-        text-align: left;
-        padding-left: 20px;
-    }
-
-    .schedule-label {
-        font-size: 12px;
-        color: var(--accent-blue);
-        font-weight: 700;
-        margin-bottom: 12px;
-        display: block;
-    }
-
-    .schedule-time {
-        display: flex;
-        align-items: center;
-        font-size: 18px;
-        margin-bottom: 8px;
-        color: var(--text-main);
-        letter-spacing: 0.5px;
-    }
-
-    .schedule-time i {
-        width: 24px;
-        color: var(--text-sub);
-        font-size: 16px;
-    }
-
-    .schedule-arrow {
-        color: var(--icon-bg-blue);
-        font-size: 20px;
-        padding: 0 10px;
-        display: flex;
-        align-items: center;
-        height: 100%;
-        position: relative;
-        top: 10px;
-    }
-    
-    .schedule-divider-vertical {
-        width: 1px;
-        height: 60px;
-        background-color: var(--border-color);
-        margin: 0 5px;
-        position: relative;
-        top: 10px;
-    }
-
-    .footer-info {
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        font-size: 14px;
-        color: var(--text-main);
-    }
-
-    .footer-info div {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
-    }
-
-    .footer-info i {
-        color: var(--accent-blue);
-        font-size: 16px;
-    }
-
-    @media (max-width: 480px) {
-        .maintenance-card {
-            padding: 40px 20px;
-        }
-        
-        .schedule-time {
-            font-size: 16px;
-        }
-        
-        .schedule-label {
-            font-size: 11px;
-        }
-        
-        .schedule-block.right {
-            padding-left: 10px;
-        }
-    }
-</style>
+    .btn-logout:hover { color: var(--gray-800); border-color: var(--gray-400); }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--gray-200); border-radius: 99px; }
+  </style>
 </head>
 <body>
 
-<div class="maintenance-card">
-    <!-- 再現したアイコン部分 -->
-    <div class="icon-container">
-        <img src="data:image/jpeg;base64,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" alt="皇帝ペンギンの写真">
-    </div>
-
-    <!-- タイトル -->
-    <h1>緊急メンテナンス中</h1>
-
-    <hr class="divider-dotted">
-
-    <!-- メッセージ -->
-    <div class="message">
-        ただいまシステムを調整しています。<br>
-        ご不便をおかけしますが、<br>
-        もう少しだけお待ちください。<br>
-        2026.10.27 16:15更新
-    </div>
-
-    <hr class="divider-solid">
-
-    <!-- 日程 -->
-    <div class="schedule-container">
-        <div class="schedule-block">
-            <span class="schedule-label">メンテナンス開始</span>
-            <div class="schedule-time"><i class="fa-regular fa-calendar"></i> 2026/10/27</div>
-            <div class="schedule-time"><i class="fa-regular fa-clock"></i> 16:15</div>
-        </div>
-        
-        <div class="schedule-divider-vertical"></div>
-        <div class="schedule-arrow"><i class="fa-solid fa-caret-right"></i></div>
-
-        <div class="schedule-block right">
-            <span class="schedule-label">メンテナンス終了（予定）</span>
-            <div class="schedule-time"><i class="fa-regular fa-calendar"></i> 未定</div>
-            <div class="schedule-time"><i class="fa-regular fa-clock"></i> 未定</div>
-        </div>
-    </div>
-
-    <hr class="divider-solid">
-
-    <!-- フッター情報 -->
-    <div class="footer-info">
-        <div>
-            <i class="fa-regular fa-building"></i>
-            <span>軽音楽部 部室予約システム</span>
-        </div>
-        <div>
-            <i class="fa-regular fa-user"></i>
-            <span>サイト管理者</span>
-        </div>
-    </div>
+<!-- ローディング -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <p class="loading-text">Firebaseに接続中...</p>
 </div>
 
+<header class="page-header">
+  <div class="logo-mark">♪</div>
+  <h1>軽音楽部 部室予約システム</h1>
+  <button id="btnGuide" class="guide-icon" title="ご利用について" aria-label="ご利用について">?</button>
+  <div class="status-badge" id="statusBadge" style="display:none">
+    <span class="status-dot"></span>
+    <span id="statusText">接続中...</span>
+  </div>
+</header>
+
+<!-- 操作ガイド（控えめ・困ったときに見る用） -->
+<div class="overlay" id="guideOverlay">
+  <div class="modal guide-modal">
+    <h3>ご利用について</h3>
+    <p class="sub">困ったときはこちらをご確認ください</p>
+    <ul class="guide-list">
+      <li>予約・削除には<strong>LINEログイン</strong>が必要です。</li>
+      <li>予約できるのは<strong>今週分のみ</strong>です（来週以降は閲覧のみ）。</li>
+      <li>週の予約は<strong>毎週日曜0:00</strong>に更新されます。</li>
+      <li>削除できるのは、<strong>自分がログインしたLINEアカウントで作成した予約のみ</strong>です。他の人が作った予約は削除できません。</li>
+      <li>1回の予約時間は<strong>最大190分</strong>までです。</li>
+      <li>「バンド名または個人名」「鍵の返却者」は自由記入のため、本人確認の目的には使われません。</li>
+    </ul>
+    <div class="modal-btns">
+      <button class="btn-sec" id="btnGuideClose">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<main class="container">
+  <div class="toolbar">
+    <div class="week-nav">
+      <button id="prevWeek">&#8249;</button>
+      <span class="week-label" id="weekLabel"></span>
+      <button id="todayBtn" class="today-btn">今週</button>
+      <button id="nextWeek">&#8250;</button>
+    </div>
+    <div class="toolbar-auth">
+      <!-- 未ログイン時 -->
+      <button class="btn-line" id="btnLineLogin">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M24 10.314C24 4.943 18.615.572 12 .572S0 4.943 0 10.314c0 4.811 4.27 8.842 10.035 9.608.391.082.923.258 1.058.59.12.301.079.766.038 1.08l-.164 1.02c-.045.301-.24 1.186 1.049.645 1.291-.539 6.916-4.078 9.436-6.975C23.176 14.393 24 12.458 24 10.314"/>
+        </svg>
+        LINEでログイン
+      </button>
+      <!-- ログイン後（認証後に表示） -->
+      <div id="userArea" style="display:none" class="user-area">
+        <button class="btn-logout" id="btnLogout">ログアウト</button>
+        <button class="btn-new" id="btnNew" disabled><span>＋</span> 新規予約</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="weekNotice" class="week-notice" style="display:none">
+    <span class="week-notice-icon">👁</span>
+    <span>この週は閲覧のみです — 新規予約・削除は<strong>今週のみ</strong>行えます</span>
+  </div>
+  <p class="week-cycle-note">※ 週は日曜 0:00 に更新されます</p>
+
+  <!-- 未ログイン時の案内バナー -->
+  <div id="loginRequiredBanner" class="login-required-banner" style="display:none">
+    <span class="lrb-icon">🔒</span>
+    <span>予約状況を確認・予約するには <strong>LINEでログイン</strong> してください</span>
+  </div>
+
+  <div class="tl-outer">
+    <div class="tl-inner">
+      <div class="tl-header">
+        <div class="tl-period-head"></div>
+        <div class="tl-day-head" id="th-mon"><span>月</span><span class="date-num" id="dn-mon"></span></div>
+        <div class="tl-day-head" id="th-tue"><span>火</span><span class="date-num" id="dn-tue"></span></div>
+        <div class="tl-day-head" id="th-wed"><span>水</span><span class="date-num" id="dn-wed"></span></div>
+        <div class="tl-day-head" id="th-thu"><span>木</span><span class="date-num" id="dn-thu"></span></div>
+        <div class="tl-day-head" id="th-fri"><span>金</span><span class="date-num" id="dn-fri"></span></div>
+        <div class="tl-day-head" id="th-sat"><span>土</span><span class="date-num" id="dn-sat"></span></div>
+      </div>
+      <div class="tl-scroll">
+        <div class="tl-body">
+          <div class="tl-period-col" id="periodCol"></div>
+          <div class="tl-day-col" id="col-mon"></div>
+          <div class="tl-day-col" id="col-tue"></div>
+          <div class="tl-day-col" id="col-wed"></div>
+          <div class="tl-day-col" id="col-thu"></div>
+          <div class="tl-day-col" id="col-fri"></div>
+          <div class="tl-day-col" id="col-sat"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- モーダル -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <div id="formArea">
+      <h3>予約する</h3>
+      <p class="sub">時限または時刻で指定できます</p>
+      <div class="form-grid">
+        <div class="form-field full">
+          <label>曜日</label>
+          <select id="daySel"></select>
+        </div>
+        <div class="form-field full">
+          <div class="booking-tabs">
+            <button type="button" id="tabPeriod" class="tab-btn active">時限で予約</button>
+            <button type="button" id="tabTime"   class="tab-btn">時刻で指定</button>
+          </div>
+        </div>
+        <!-- 時限タブ -->
+        <div class="form-field full" id="tabContentPeriod">
+          <label>時限</label>
+          <select id="periodSel">
+            <option value="">── 選択してください ──</option>
+            <option value="0">1限　　9:00 〜 10:30</option>
+            <option value="1">2限　　10:40 〜 12:10</option>
+            <option value="2">昼休み　12:10 〜 13:00</option>
+            <option value="3">3限　　13:00 〜 14:30</option>
+            <option value="4">4限　　14:40 〜 16:10</option>
+            <option value="5">5限　　16:20 〜 17:50</option>
+            <option value="6">授業外　17:50 〜 18:30</option>
+          </select>
+        </div>
+        <!-- 時刻タブ（非表示） -->
+        <div id="tabContentTime" style="display:none">
+          <div class="form-field">
+            <label>開始時間</label>
+            <input type="time" id="startInput" min="09:00" max="19:00" value="09:00" />
+          </div>
+          <div class="form-field">
+            <label>終了時間</label>
+            <input type="time" id="endInput" min="09:00" max="19:00" value="10:00" />
+          </div>
+        </div>
+        <div class="form-field full">
+          <label>バンド名または個人名</label>
+          <input type="text" id="bandInput" maxlength="50" autocomplete="off" />
+        </div>
+        <div class="form-field full">
+          <label>鍵の返却者</label>
+          <input type="text" id="memberInput" maxlength="30" autocomplete="off" />
+        </div>
+      </div>
+      <p class="err" id="formErr"></p>
+      <div class="modal-btns">
+        <button class="btn-sec" id="btnCancel">キャンセル</button>
+        <button class="btn-book" id="btnBook">予約する</button>
+      </div>
+    </div>
+    <div id="viewArea" style="display:none">
+      <h3>予約内容</h3>
+      <p class="sub" id="viewDateSub"></p>
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0;margin-bottom:12px;">
+        <span class="view-chip" id="viewTime"></span>
+        <span class="view-period-chip" id="viewPeriod" style="display:none"></span>
+      </div>
+      <p class="view-band" id="viewBand"></p>
+      <p class="view-member" id="viewMember"></p>
+      <div class="modal-btns">
+        <button class="btn-sec" id="btnClose">閉じる</button>
+        <button class="btn-del" id="btnDelete">予約を削除</button>
+      </div>
+    </div>
+    <div id="deleteConfirmArea" style="display:none">
+      <h3>削除の確認</h3>
+      <p class="sub">この操作は取り消せません</p>
+      <p class="delete-hint" id="deleteHint"></p>
+      <!-- 最後の利用者向け警告（該当する場合のみ表示） -->
+      <div id="lastUserWarning" style="display:none" class="last-user-warning">
+        <p class="last-user-msg">⚠️ あなたはこの日の<strong>最後の利用者</strong>です。<br>鍵の返却について、前の利用者や関係者に連絡・確認してください。</p>
+        <label class="last-user-check">
+          <input type="checkbox" id="lastUserCheck" />
+          <span>連絡・確認することを了解しました</span>
+        </label>
+      </div>
+      <div class="form-field" style="margin-bottom:8px;">
+        <label>バンド名または個人名を入力して確定</label>
+        <input type="text" id="deleteBandInput" placeholder="バンド名または個人名を入力..." autocomplete="off" />
+      </div>
+      <p class="err" id="deleteErr"></p>
+      <div class="modal-btns">
+        <button class="btn-sec" id="btnDeleteCancel">戻る</button>
+        <button class="btn-del" id="btnDeleteConfirm">削除する</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 定数 ────────────────────────────────────────
+const PX_PER_MIN = 1.2;
+const DAY_START  = 9 * 60;
+const DAY_END    = 19 * 60;
+const SAT_END    = 15 * 60 + 30; // 土曜日は15:30まで
+const TOTAL_MIN  = DAY_END - DAY_START;
+const TOP_OFFSET = 16;
+const TOTAL_H    = TOTAL_MIN * PX_PER_MIN + TOP_OFFSET;
+
+const DAYS       = ['mon','tue','wed','thu','fri','sat'];
+const DAY_LABELS = {mon:'月',tue:'火',wed:'水',thu:'木',fri:'金',sat:'土'};
+
+let bookings    = {};
+let weekOffset  = 0;
+let activeViewId   = null;
+let activeViewBand = null;
+let fbReady     = false;
+let currentUser = null; // LINEログイン済みユーザー
+
+
+// ── 時限データ（90分授業・5限制・昼休み50分）──
+const PERIODS = [
+  { label:'1限',   startTime:'9:00',  endTime:'10:30', color:'#97C459', bg:'rgba(99,153,34,0.08)',   text:'#27500A', muted:'#639922' },
+  { label:'2限',   startTime:'10:40', endTime:'12:10', color:'#84CC16', bg:'rgba(132,204,22,0.08)',  text:'#365314', muted:'#65A30D' },
+  { label:'昼休み',startTime:'12:10', endTime:'13:00', color:'#F59E0B', bg:'rgba(245,158,11,0.07)',  text:'#78350F', muted:'#D97706', isBreak:true },
+  { label:'3限',   startTime:'13:00', endTime:'14:30', color:'#34D399', bg:'rgba(52,211,153,0.07)',  text:'#065F46', muted:'#059669' },
+  { label:'4限',   startTime:'14:40', endTime:'16:10', color:'#60A5FA', bg:'rgba(96,165,250,0.07)',  text:'#1E3A8A', muted:'#3B82F6' },
+  { label:'5限',   startTime:'16:20', endTime:'17:50', color:'#C084FC', bg:'rgba(192,132,252,0.07)', text:'#4C1D95', muted:'#9333EA' },
+  { label:'授業外',startTime:'17:50', endTime:'18:30', color:'#94A3B8', bg:'rgba(148,163,184,0.06)', text:'#334155', muted:'#64748B' },
+];
+
+// ── ユーティリティ ───────────────────────────────
+function timeToMin(t) { const [h,m]=t.split(':').map(Number); return h*60+m; }
+function minToTime(m) { return `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`; }
+function genId()      { return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function escHtml(s)   { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── ステータス表示 ───────────────────────────────
+function setStatus(state, text) {
+  const badge = document.getElementById('statusBadge');
+  const label = document.getElementById('statusText');
+  badge.className = 'status-badge ' + state;
+  label.textContent = text;
+  // 「接続中」表示は不要な情報なので、エラー時のみバッジを表示する
+  badge.style.display = (state === 'error') ? '' : 'none';
+}
+
+// ── 日付ユーティリティ ──────────────────────────
+function getWeekDates(offset) {
+  const now=new Date(), dow=now.getDay();
+  const monday=new Date(now);
+  // 日曜(0)は翌週月曜の前日ではなく、翌月曜から始まる週として扱う（日曜0:00に週更新）
+  monday.setDate(now.getDate() - (dow === 0 ? -1 : dow - 1) + offset * 7);
+  const dates={};
+  DAYS.forEach((d,i)=>{ const dt=new Date(monday); dt.setDate(monday.getDate()+i); dates[d]=dt; });
+  return dates;
+}
+function dateKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
+function isToday(date) { return dateKey(date)===dateKey(new Date()); }
+
+// ── ヘッダー更新 ────────────────────────────────
+function updateHeader() {
+  const dates=getWeekDates(weekOffset);
+  const first=dates['mon'], last=dates['sat'];
+  document.getElementById('weekLabel').textContent=
+    `${first.getFullYear()}年 ${first.getMonth()+1}/${first.getDate()} 〜 ${last.getMonth()+1}/${last.getDate()}`;
+  DAYS.forEach(d=>{
+    const dt=dates[d];
+    document.getElementById('dn-'+d).textContent=`${dt.getMonth()+1}/${dt.getDate()}`;
+    const th=document.getElementById('th-'+d);
+    const col=document.getElementById('col-'+d);
+    if(isToday(dt)){ th.classList.add('today'); col.classList.add('today-col'); }
+    else           { th.classList.remove('today'); col.classList.remove('today-col'); }
+    col.style.cursor = (weekOffset === 0 && !!currentUser) ? 'crosshair' : 'default';
+  });
+  // ログイン済み && 今週 のときのみ新規予約を有効化
+  const isCurrentWeek = weekOffset === 0;
+  const canBook = fbReady && isCurrentWeek && !!currentUser;
+  if(fbReady) document.getElementById('btnNew').disabled = !canBook;
+  document.getElementById('weekNotice').style.display = isCurrentWeek ? 'none' : '';
+}
+
+// ── タイムライン初期化（1回だけ） ──────────────
+function initTimeline() {
+  DAYS.forEach(d => { document.getElementById('col-'+d).style.height = TOTAL_H + 'px'; });
+
+  // ── 時限専用列・曜日バンドを描画 ──
+  const periodCol = document.getElementById('periodCol');
+  periodCol.style.height = TOTAL_H + 'px';
+
+  PERIODS.forEach((p, idx) => {
+    const sMin  = timeToMin(p.startTime);
+    const eMin  = timeToMin(p.endTime);
+    const top   = TOP_OFFSET + (sMin - DAY_START) * PX_PER_MIN;
+    const bandH = (eMin - sMin) * PX_PER_MIN;
+
+    // 時限専用列にセクション追加
+    const sec = document.createElement('div');
+    sec.className = 'period-section';
+    sec.style.cssText = `
+      top: ${top}px; height: ${bandH}px;
+      --ps-color: ${p.color}; --ps-bg: ${p.bg};
+      --ps-text: ${p.text}; --ps-muted: ${p.muted};
+    `;
+    const tStart = minToTime(sMin);
+    const tEnd   = minToTime(eMin);
+    sec.innerHTML = `
+      <span class="ps-name">${p.label}</span>
+      <span class="ps-time">${tStart}<br>〜<br>${tEnd}</span>
+    `;
+    periodCol.appendChild(sec);
+
+    // 曜日カラムに背景バンド
+    DAYS.forEach(d => {
+      const col = document.getElementById('col-' + d);
+      const band = document.createElement('div');
+      band.className = 'period-band';
+      band.style.cssText = `top:${top}px; height:${bandH}px; background:${p.bg}; --pb-color:${p.color};`;
+      col.appendChild(band);
+    });
+  });
+
+  DAYS.forEach(d=>{
+    const col = document.getElementById('col-'+d);
+    for(let m=0; m<=TOTAL_MIN; m+=30){
+      const line = document.createElement('div');
+      line.className = 'tl-gline '+(m%60===0?'hour':'half');
+      line.style.top = (TOP_OFFSET + m*PX_PER_MIN)+'px';
+      col.appendChild(line);
+    }
+    col.addEventListener('click', e=>{
+      if(!fbReady || weekOffset !== 0 || !currentUser || e.target.closest('.booking-block')) return;
+      const rect       = col.getBoundingClientRect();
+      // getBoundingClientRect() はビューポート基準のため、スクロール量は自動考慮済み
+      // スクロールオフセットを加算すると二重カウントになるため不要
+      const y          = e.clientY - rect.top - TOP_OFFSET;
+      const clickedMin = DAY_START + y / PX_PER_MIN;
+      const dayEnd     = (d === 'sat') ? SAT_END : DAY_END;
+
+      // クリックした位置が時限内かどうか判定
+      const periodIdx = PERIODS.findIndex(p => {
+        const ps = timeToMin(p.startTime), pe = timeToMin(p.endTime);
+        return clickedMin >= ps && clickedMin < pe && pe <= dayEnd;
+      });
+
+      if (periodIdx >= 0) {
+        // 時限内をクリック → 時限タブで開き、その時限を自動選択
+        openForm(d);
+        const periodSel = document.getElementById('periodSel');
+        periodSel.value = String(periodIdx);
+        periodSel.dispatchEvent(new Event('change'));
+      } else {
+        // 時限と時限のギャップをクリック → 直後の時限にスナップ
+        const nextIdx = PERIODS.findIndex(p =>
+          timeToMin(p.startTime) > clickedMin &&
+          timeToMin(p.endTime) <= dayEnd
+        );
+        if (nextIdx >= 0) {
+          openForm(d);
+          const periodSel = document.getElementById('periodSel');
+          periodSel.value = String(nextIdx);
+          periodSel.dispatchEvent(new Event('change'));
+        } else {
+          // 授業外より後（18:30〜19:00）→ 時刻タブで開く
+          const snapped  = Math.round(clickedMin / 15) * 15;
+          const startMin = Math.max(DAY_START, Math.min(dayEnd - 30, snapped));
+          const endMin   = Math.min(dayEnd, startMin + 60);
+          openForm(d, minToTime(startMin), minToTime(endMin));
+        }
+      }
+    });
+  });
+
+  // 土曜日：15:30以降は閉室のためグレーアウト表示
+  const satCol = document.getElementById('col-sat');
+  if (satCol) {
+    const closedTop = TOP_OFFSET + (SAT_END - DAY_START) * PX_PER_MIN;
+    const closedH   = TOTAL_H - closedTop;
+    const closedBand = document.createElement('div');
+    closedBand.className = 'closed-band';
+    closedBand.style.cssText = `top:${closedTop}px; height:${closedH}px;`;
+    closedBand.innerHTML = `<span class="closed-label">閉室（15:30〜）</span>`;
+    satCol.appendChild(closedBand);
+  }
+}
+
+// ── 予約ブロック描画 ────────────────────────────
+function renderBookings() {
+  const dates = getWeekDates(weekOffset);
+  DAYS.forEach(d=>{
+    const col  = document.getElementById('col-'+d);
+    col.querySelectorAll('.booking-block').forEach(el=>el.remove());
+    const dKey = dateKey(dates[d]);
+    Object.values(bookings).filter(b=>b.dateKey===dKey).forEach(b=>{
+      const sMin = timeToMin(b.startTime), eMin = timeToMin(b.endTime);
+      const top  = TOP_OFFSET + (sMin-DAY_START)*PX_PER_MIN;
+      const h    = (eMin-sMin)*PX_PER_MIN;
+      const block = document.createElement('div');
+      block.className  = 'booking-block';
+      block.style.top  = top+'px';
+      block.style.height = h+'px';
+      let inner = `<div class="bb-time">${b.startTime}〜${b.endTime}</div>`;
+      if(b.period) inner += `<div class="bb-period">${escHtml(b.period)}</div>`;
+      inner += `<div class="bb-band">${escHtml(b.band)}</div>`;
+      if(h>=42) inner += `<div class="bb-member">${escHtml(b.member)}</div>`;
+      block.innerHTML = inner;
+      block.addEventListener('click', e=>{ e.stopPropagation(); openView(b); });
+      col.appendChild(block);
+    });
+  });
+}
+
+// ── フォーム ────────────────────────────────────
+function buildDaySel(selectedDay) {
+  const dates = getWeekDates(weekOffset);
+  const sel   = document.getElementById('daySel');
+  sel.innerHTML = '';
+  DAYS.forEach(d=>{
+    const dt  = dates[d];
+    const opt = document.createElement('option');
+    opt.value       = d;
+    opt.textContent = `${DAY_LABELS[d]}（${dt.getMonth()+1}/${dt.getDate()}）`;
+    if(d===selectedDay) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+// ── タブ切り替え ────────────────────────────────
+function switchTab(tab) {
+  const isPeriod = tab === 'period';
+  document.getElementById('tabPeriod').classList.toggle('active', isPeriod);
+  document.getElementById('tabTime').classList.toggle('active', !isPeriod);
+  document.getElementById('tabContentPeriod').style.display = isPeriod ? '' : 'none';
+  document.getElementById('tabContentTime').style.display   = isPeriod ? 'none' : 'grid';
+}
+
+function openForm(day, startTime, endTime) {
+  buildDaySel(day || 'mon');
+  document.getElementById('bandInput').value   = '';
+  document.getElementById('memberInput').value = '';
+  document.getElementById('formErr').style.display = 'none';
+
+  // 土曜日は終了時刻の上限を15:30に制限し、超える時限を選択不可にする
+  applySaturdayLimit();
+
+  if(startTime && endTime) {
+    // タイムラインクリック経由：時刻タブで開く
+    document.getElementById('startInput').value = startTime;
+    document.getElementById('endInput').value   = endTime;
+    document.getElementById('periodSel').value  = '';
+    updatePeriodSel();
+    switchTab('time');
+  } else {
+    // ボタン経由：時限タブで開く（未選択）
+    document.getElementById('periodSel').value = '';
+    switchTab('period');
+  }
+
+  document.getElementById('formArea').style.display        = '';
+  document.getElementById('viewArea').style.display        = 'none';
+  document.getElementById('deleteConfirmArea').style.display = 'none';
+  document.getElementById('overlay').classList.add('show');
+  setTimeout(()=>document.getElementById('bandInput').focus(), 60);
+}
+function openView(b) {
+  activeViewId   = b.id;
+  activeViewBand = b.band;
+  const dt = new Date(b.dateKey+'T00:00:00');
+  document.getElementById('viewDateSub').textContent =
+    `${dt.getFullYear()}年${dt.getMonth()+1}月${dt.getDate()}日 (${DAY_LABELS[b.day]})`;
+  document.getElementById('viewTime').textContent   = `${b.startTime} 〜 ${b.endTime}`;
+  const periodEl = document.getElementById('viewPeriod');
+  if(b.period) {
+    periodEl.textContent = b.period;
+    periodEl.style.display = '';
+  } else {
+    periodEl.style.display = 'none';
+  }
+  document.getElementById('viewBand').textContent   = b.band;
+  document.getElementById('viewMember').textContent = `返却者：${b.member}`;
+  document.getElementById('btnDelete').style.display = weekOffset === 0 ? '' : 'none';
+  document.getElementById('formArea').style.display        = 'none';
+  document.getElementById('viewArea').style.display        = '';
+  document.getElementById('deleteConfirmArea').style.display = 'none';
+  document.getElementById('overlay').classList.add('show');
+}
+function closeOverlay() {
+  document.getElementById('overlay').classList.remove('show');
+  document.getElementById('deleteConfirmArea').style.display = 'none';
+  document.getElementById('viewArea').style.display          = 'none';
+  // 保険：閉じるたびにボタンの状態を必ず元に戻す
+  const btnConf = document.getElementById('btnDeleteConfirm');
+  if (btnConf) { btnConf.disabled = false; btnConf.textContent = '削除する'; }
+  const btnBook = document.getElementById('btnBook');
+  if (btnBook) { btnBook.disabled = false; btnBook.textContent = '予約する'; }
+  const chk = document.getElementById('lastUserCheck');
+  if (chk) chk.checked = false;
+  activeViewId   = null;
+  activeViewBand = null;
+}
+
+// ── 重複チェック ────────────────────────────────
+function checkOverlap(dKey, start, end, excludeId) {
+  const sMin=timeToMin(start), eMin=timeToMin(end);
+  return Object.values(bookings).find(b=>
+    b.dateKey===dKey && b.id!==excludeId &&
+    sMin<timeToMin(b.endTime) && eMin>timeToMin(b.startTime)
+  );
+}
+
+// ── 時限検出 ────────────────────────────────────
+function detectPeriodLabel(start, end) {
+  const s = timeToMin(start), e = timeToMin(end);
+  const match = PERIODS.find(p => timeToMin(p.startTime)===s && timeToMin(p.endTime)===e);
+  return match ? match.label : null;
+}
+
+// 時間入力が時限と一致すればセレクタを自動更新
+function updatePeriodSel() {
+  const start = document.getElementById('startInput').value;
+  const end   = document.getElementById('endInput').value;
+  if(!start || !end) return;
+  const idx = PERIODS.findIndex(p =>
+    timeToMin(p.startTime)===timeToMin(start) && timeToMin(p.endTime)===timeToMin(end)
+  );
+  document.getElementById('periodSel').value = idx >= 0 ? String(idx) : '';
+}
+
+// ── イベント ────────────────────────────────────
+document.getElementById('btnBook').addEventListener('click', async ()=>{
+  const btnBook = document.getElementById('btnBook');
+  const day    = document.getElementById('daySel').value;
+  const start  = document.getElementById('startInput').value;
+  const end    = document.getElementById('endInput').value;
+  const band   = document.getElementById('bandInput').value.trim();
+  const member = document.getElementById('memberInput').value.trim();
+  const errEl  = document.getElementById('formErr');
+  const showErr = msg => { errEl.textContent=msg; errEl.style.display='block'; };
+
+  const isPeriodTab = document.getElementById('tabPeriod').classList.contains('active');
+  if(isPeriodTab && !document.getElementById('periodSel').value) {
+    showErr('時限を選択してください'); return;
+  }
+  if(!start||!end)          { showErr('開始・終了時間を入力してください'); return; }
+  const sMin=timeToMin(start), eMin=timeToMin(end);
+  const dayEnd = (day === 'sat') ? SAT_END : DAY_END;
+  if(eMin<=sMin)            { showErr('終了時間は開始時間より後にしてください'); return; }
+  if(eMin-sMin > 190)       { showErr('一度の予約は最大190分（3時間10分）までです'); return; }
+  if(sMin<DAY_START)        { showErr('予約は9:00以降から可能です'); return; }
+  if(eMin>dayEnd)           { showErr(day==='sat' ? '土曜日は15:30までです' : '予約は19:00までです'); return; }
+  if(!band)                 { showErr('バンド名または個人名を入力してください'); return; }
+  if(!member)               { showErr('鍵の返却者を入力してください'); return; }
+
+  const dKey    = dateKey(getWeekDates(weekOffset)[day]);
+  const conflict= checkOverlap(dKey, start, end, null);
+  if(conflict){ showErr(`${conflict.startTime}〜${conflict.endTime}「${conflict.band}」と重複しています`); return; }
+
+  // 連打防止：保存完了 or 失敗まで無効化
+  btnBook.disabled = true;
+  btnBook.textContent = '送信中...';
+
+  const id = genId();
+  const periodLabel = detectPeriodLabel(start, end);
+  const data = { id, dateKey:dKey, day, startTime:start, endTime:end, band, member };
+  if(periodLabel) data.period = periodLabel;
+  try {
+    await window._fbSave(id, data);
+    closeOverlay();
+  } catch(e) {
+    showErr('保存に失敗しました。接続を確認してください。');
+  } finally {
+    btnBook.disabled = false;
+    btnBook.textContent = '予約する';
+  }
+});
+
+// ② 削除ボタン → 確認エリアへ切り替え
+// ── 最後の利用者判定 ────────────────────────────
+function isLastBookingOfDay(booking) {
+  // 同じ日の他の予約の中で、この予約より終了時間が遅いものがあればfalse
+  return !Object.values(bookings).some(b =>
+    b.dateKey === booking.dateKey &&
+    b.id !== booking.id &&
+    timeToMin(b.endTime) > timeToMin(booking.endTime)
+  );
+}
+
+document.getElementById('btnDelete').addEventListener('click', ()=>{
+  document.getElementById('deleteHint').innerHTML =
+    `「<strong>${escHtml(activeViewBand)}</strong>」の予約を削除します。<br>バンド名または個人名をそのまま入力して確定してください。`;
+  document.getElementById('deleteBandInput').value = '';
+  document.getElementById('deleteErr').style.display = 'none';
+  document.getElementById('lastUserCheck').checked = false;
+
+  // 前回の削除処理でボタンが「削除中...」のまま残っている可能性があるため、
+  // 確認画面を開くたびに必ずリセットする
+  const btnConf = document.getElementById('btnDeleteConfirm');
+  btnConf.disabled = false;
+  btnConf.textContent = '削除する';
+
+  // 最後の利用者かどうかを判定して警告を表示
+  const currentBooking = Object.values(bookings).find(b => b.id === activeViewId);
+  const isLast = currentBooking && isLastBookingOfDay(currentBooking);
+  document.getElementById('lastUserWarning').style.display = isLast ? '' : 'none';
+
+  document.getElementById('viewArea').style.display          = 'none';
+  document.getElementById('deleteConfirmArea').style.display = '';
+  setTimeout(()=>document.getElementById('deleteBandInput').focus(), 60);
+});
+
+// 削除確認：戻る
+document.getElementById('btnDeleteCancel').addEventListener('click', ()=>{
+  document.getElementById('deleteConfirmArea').style.display = 'none';
+  document.getElementById('viewArea').style.display          = '';
+});
+
+// 削除確認：実行
+document.getElementById('btnDeleteConfirm').addEventListener('click', async ()=>{
+  const input   = document.getElementById('deleteBandInput').value.trim();
+  const errEl   = document.getElementById('deleteErr');
+  const btnConf = document.getElementById('btnDeleteConfirm');
+
+  // 最後の利用者警告が表示中の場合、チェックボックスを必須にする
+  const warningVisible = document.getElementById('lastUserWarning').style.display !== 'none';
+  if(warningVisible && !document.getElementById('lastUserCheck').checked) {
+    errEl.textContent = '連絡・確認の了解にチェックを入れてください';
+    errEl.style.display = 'block'; return;
+  }
+
+  if(!input) {
+    errEl.textContent = 'バンド名または個人名を入力してください';
+    errEl.style.display = 'block'; return;
+  }
+  if(input.toLowerCase() !== (activeViewBand||'').toLowerCase()) {
+    errEl.textContent = 'バンド名が一致しません。もう一度確認してください。';
+    errEl.style.display = 'block'; return;
+  }
+  // 連打防止
+  btnConf.disabled = true;
+  btnConf.textContent = '削除中...';
+  try {
+    await window._fbDelete(activeViewId);
+    closeOverlay();
+  } catch(e) {
+    const msg = e.message || '';
+    errEl.textContent = msg.includes('自分が作成した') ? msg : '削除に失敗しました。接続を確認してください。';
+    errEl.style.display = 'block';
+    btnConf.disabled = false;
+    btnConf.textContent = '削除する';
+  }
+});
+
+// 曜日が変わったとき、土曜日なら15:30以降を予約不可にする
+function applySaturdayLimit() {
+  const day   = document.getElementById('daySel').value;
+  const isSat = (day === 'sat');
+
+  document.getElementById('endInput').max = isSat ? '15:30' : '19:00';
+
+  // 時限セレクタ：15:30を超える時限は土曜日のみ選択不可にする（テキストは変更しない）
+  const periodSel = document.getElementById('periodSel');
+  Array.from(periodSel.options).forEach(opt => {
+    if (!opt.value) return;
+    const p = PERIODS[parseInt(opt.value)];
+    opt.disabled = isSat && p && timeToMin(p.endTime) > SAT_END;
+  });
+  // 選択中の時限が無効化された場合はリセット
+  if (periodSel.selectedOptions[0]?.disabled) periodSel.value = '';
+}
+document.getElementById('daySel').addEventListener('change', applySaturdayLimit);
+document.getElementById('tabPeriod').addEventListener('click', ()=> switchTab('period'));
+document.getElementById('tabTime').addEventListener('click',   ()=> switchTab('time'));
+document.getElementById('periodSel').addEventListener('change', ()=>{
+  const idx = parseInt(document.getElementById('periodSel').value);
+  if(!isNaN(idx) && PERIODS[idx]) {
+    const p = PERIODS[idx];
+    document.getElementById('startInput').value = minToTime(timeToMin(p.startTime));
+    document.getElementById('endInput').value   = minToTime(timeToMin(p.endTime));
+    document.getElementById('formErr').style.display = 'none';
+  }
+});
+document.getElementById('startInput').addEventListener('change', updatePeriodSel);
+document.getElementById('endInput').addEventListener('change', updatePeriodSel);
+document.getElementById('btnCancel').addEventListener('click', closeOverlay);
+
+// ── 操作ガイド（控えめな「？」アイコンから開く） ──
+document.getElementById('btnGuide').addEventListener('click', ()=>{
+  document.getElementById('guideOverlay').classList.add('show');
+});
+document.getElementById('btnGuideClose').addEventListener('click', ()=>{
+  document.getElementById('guideOverlay').classList.remove('show');
+});
+document.getElementById('guideOverlay').addEventListener('click', e=>{
+  if(e.target===document.getElementById('guideOverlay'))
+    document.getElementById('guideOverlay').classList.remove('show');
+});
+document.getElementById('btnClose').addEventListener('click', closeOverlay);
+document.getElementById('overlay').addEventListener('click', e=>{
+  if(e.target===document.getElementById('overlay')) closeOverlay();
+});
+document.getElementById('prevWeek').addEventListener('click', ()=>{ weekOffset--; updateHeader(); renderBookings(); });
+document.getElementById('nextWeek').addEventListener('click', ()=>{ weekOffset++; updateHeader(); renderBookings(); });
+document.getElementById('todayBtn').addEventListener('click', ()=>{ weekOffset=0; updateHeader(); renderBookings(); });
+document.getElementById('btnNew').addEventListener('click', ()=>{
+  const dow = new Date().getDay();
+  const map = {1:'mon',2:'tue',3:'wed',4:'thu',5:'fri',6:'sat',0:'mon'};
+  openForm(map[dow]||'mon'); // 時限タブで開く
+});
+
+// ── 起動 ────────────────────────────────────────
+initTimeline();
+updateHeader();
+
+// Firebase 準備完了を待つ
+let _unsubscribeBookings = null; // リスナーのunsubscribe関数
+
+function startBookingListener() {
+  // 既存のリスナーを停止してから再起動（二重登録防止）
+  if (_unsubscribeBookings) { _unsubscribeBookings(); _unsubscribeBookings = null; }
+  _unsubscribeBookings = window._fbListen(data => {
+    bookings = data;
+    renderBookings();
+  });
+}
+
+function stopBookingListener() {
+  if (_unsubscribeBookings) { _unsubscribeBookings(); _unsubscribeBookings = null; }
+  bookings = {};
+  renderBookings();
+}
+
+// 未ログイン案内の表示切り替え
+function updateLoginBanner(isLoggedIn) {
+  const banner = document.getElementById('loginRequiredBanner');
+  if (banner) banner.style.display = isLoggedIn ? 'none' : '';
+}
+
+function onFirebaseReady() {
+  fbReady = true;
+  setStatus('connected', 'リアルタイム同期中');
+  document.getElementById('loadingOverlay').classList.add('hidden');
+  updateHeader();
+  // ログイン状態は auth-changed で確認してからリスナーを開始する
+  // （currentUser がすでにセットされている場合はここで開始）
+  if (currentUser) {
+    startBookingListener();
+    updateLoginBanner(true);
+  } else {
+    updateLoginBanner(false);
+  }
+}
+
+// 認証状態変化を受け取り、リスナーの再起動・停止・案内表示を制御
+document.addEventListener('auth-changed', e => {
+  const prev = currentUser;
+  currentUser = e.detail.user;
+  if (fbReady) {
+    updateHeader();
+    if (currentUser && !prev) {
+      // ログインした → リスナーを（再）起動
+      startBookingListener();
+      updateLoginBanner(true);
+    } else if (!currentUser && prev) {
+      // ログアウトした → リスナーを停止してカレンダーをクリア
+      stopBookingListener();
+      updateLoginBanner(false);
+    }
+  }
+});
+
+if(window._fbReady) {
+  onFirebaseReady();
+} else {
+  document.addEventListener('firebase-ready', onFirebaseReady);
+  setTimeout(()=>{
+    if(!fbReady){
+      setStatus('error', '接続失敗 — 設定を確認してください');
+      document.getElementById('loadingOverlay').classList.add('hidden');
+      document.getElementById('loadingOverlay').innerHTML =
+        '<p style="color:#A32D2D;font-size:14px;text-align:center;padding:2rem">Firebase の設定が正しくありません。<br>HTML内の YOUR_*** を書き換えてください。</p>';
+      document.getElementById('loadingOverlay').classList.remove('hidden');
+    }
+  }, 8000);
+}
+</script>
 </body>
 </html>
